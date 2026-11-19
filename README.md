@@ -14,7 +14,7 @@ project. It includes:
 
 | Cloud | URL | Status |
 |---|---|---|
-| AWS (k3s on EC2 + RDS PostgreSQL) | _pending_ | Infrastructure code validated and planned (22 resources); not yet applied |
+| AWS (k3s on EC2 + RDS PostgreSQL, us-east-1) | **http://3.234.255.223/** | ✅ Live. Provisioned with `scripts/infra.sh aws free-tier apply` (22 resources), deployed by the pipeline (rollout + smoke test + AI analysis: *healthy → proceed*, gate: *canary*) |
 | GCP (k3s on Compute Engine + Cloud SQL) | _pending_ | Infrastructure code validated; needs a GCP project |
 
 ## Verification status
@@ -26,7 +26,8 @@ project. It includes:
 | Kubernetes manifests (4 overlays) | ✅ Schema-validated with `kubeconform` |
 | **Deploy + automatic rollback on a real Kubernetes cluster** | ✅ Tested on kind: a deliberately broken release was detected and rolled back with zero downtime ([details](#rollback-tested-on-a-real-cluster)) |
 | AI environment plan applied during a real deploy | ✅ Tested on kind |
-| Terraform for AWS and GCP | ✅ `fmt` + `validate`; AWS `plan` reviewed (all free-tier-eligible resources) |
+| Terraform for AWS and GCP | ✅ `fmt` + `validate` for both; **AWS applied for real** (VPC, security groups, RDS, EC2 + k3s) |
+| CD pipeline to a cloud | ✅ AWS: images → deploy → AI analysis → AI release gate, all green |
 | LLM path against the live Claude API | ⚠️ Tested with a mocked client only; set `ANTHROPIC_API_KEY` to use Claude. Without it a rule-based analyzer answers, and every result says which one did. |
 | Cloud deployments | ⏳ See [Live deployments](#live-deployments) |
 
