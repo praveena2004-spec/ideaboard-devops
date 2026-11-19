@@ -1,0 +1,15 @@
+2026-11-19T11:15:02Z Normal   Scheduled  pod/backend-5b6c7d8e9-q4m7n  Successfully assigned ideaboard-staging/backend-5b6c7d8e9-q4m7n
+2026-11-19T11:15:04Z Normal   Pulled     pod/backend-5b6c7d8e9-q4m7n  Successfully pulled image "ghcr.io/example/ideaboard-backend:9e8d7c6"
+2026-11-19T11:15:05Z Normal   Started    pod/backend-5b6c7d8e9-q4m7n  Started container backend
+--- container logs ---
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+2026-11-19 11:15:06,112 INFO ideaboard: Started env=staging version=9e8d7c6 ai=llm
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     10.244.1.1:51234 - "GET /ready HTTP/1.1" 200 OK
+INFO:     10.244.1.1:51240 - "GET /health HTTP/1.1" 200 OK
+INFO:     10.244.2.9:40112 - "GET /api/ideas HTTP/1.1" 200 OK
+INFO:     10.244.2.9:40118 - "POST /api/ideas HTTP/1.1" 201 Created
+Waiting for deployment "backend" rollout to finish: 1 of 2 updated replicas are available...
+deployment "backend" successfully rolled out

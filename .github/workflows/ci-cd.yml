@@ -1,0 +1,266 @@
+# CI/CD pipeline for Idea Board.
+#
+#  PR / push:   backend tests + AI log-analysis demo, frontend build,
+#               Terraform + Kubernetes validation, Docker build,
+#               full docker-compose smoke test
+#  push main:   also push images to GHCR, deploy to staging (auto-rollback on
+#               failure), AI release gate, then production (manual approval)
+#
+# Secrets (Settings -> Secrets and variables -> Actions / Environments):
+#   ANTHROPIC_API_KEY  repo secret, optional  - enables LLM analysis (rules otherwise)
+#   KUBE_CONFIG        environment secret in "staging" and "production":
+#                      base64 of a kubeconfig (`base64 -w0 ~/.kube/config`).
+#                      If missing, the deploy jobs skip with a notice.
+#   POSTGRES_PASSWORD  environment secret in "staging" and "production"
+# Images go to GitHub Container Registry using the built-in GITHUB_TOKEN, so no
+# registry credentials are needed and the build is cloud-agnostic.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      simulate_bad_release:
+        description: "Deploy a deliberately unhealthy backend to staging to demo rollback"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a deploy halfway
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -v
+      - name: AI log analysis demo (sample logs)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Exit codes 1/2 mean "investigate"/"rollback" - expected for the failing sample.
+          python -m app.analyze_cli logs ../samples/logs/failed-deploy.log --context "sample failed rollout" >> "$GITHUB_STEP_SUMMARY" || true
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+
+  iac-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform fmt
+        run: terraform fmt -check -recursive terraform
+      - name: terraform validate (aws + gcp)
+        run: |
+          for dir in terraform/environments/aws terraform/environments/gcp; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+      - name: Validate Kubernetes manifests (kustomize + kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          for env in staging production; do
+            kubectl kustomize "k8s/overlays/$env" | ./kubeconform -strict -summary -
+          done
+
+  compose-smoke-test:
+    # Builds both images and runs the whole stack exactly as a developer would.
+    needs: [backend-tests, frontend-build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+          sed -i "s/^APP_VERSION=.*/APP_VERSION=${GITHUB_SHA::7}/" .env
+      - name: docker compose up
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: Smoke test
+        run: bash scripts/smoke_test.sh http://localhost:3000
+      - name: Collect logs
+        if: always()
+        run: docker compose logs --no-color > compose.log 2>&1 || true
+      - name: AI analysis of compose logs
+        if: failure()
+        run: |
+          pip install -q -r backend/requirements.txt
+          (cd backend && python -m app.analyze_cli logs ../compose.log --context "docker compose CI run") >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compose-logs
+          path: compose.log
+      - name: docker compose down
+        if: always()
+        run: docker compose down -v
+
+  publish-images:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [compose-smoke-test, iac-validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend_image: ${{ steps.names.outputs.backend }}
+      frontend_image: ${{ steps.names.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: names
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"   # GHCR needs lowercase
+          echo "backend=ghcr.io/$owner/ideaboard-backend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "frontend=ghcr.io/$owner/ideaboard-frontend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: ${{ steps.names.outputs.backend }}
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+      - uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: ${{ steps.names.outputs.frontend }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  deploy-staging:
+    needs: publish-images
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      deployed: ${{ steps.deploy.outputs.deployed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -q -r backend/requirements.txt   # for the AI analyzer
+      - name: Configure kubectl
+        id: kube
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::notice::KUBE_CONFIG secret not set for 'staging' - skipping deployment."
+            echo "configured=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          mkdir -p ~/.kube && echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+      - name: Deploy (auto-rollback on failure)
+        id: deploy
+        if: steps.kube.outputs.configured == 'true'
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SIMULATE_UNHEALTHY: ${{ inputs.simulate_bad_release && 'true' || 'false' }}
+        run: |
+          bash scripts/deploy.sh staging \
+            "${{ needs.publish-images.outputs.backend_image }}" \
+            "${{ needs.publish-images.outputs.frontend_image }}"
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.kube.outputs.configured == 'true'
+        with:
+          name: staging-deploy-logs
+          path: deploy-logs/
+
+  deploy-production:
+    needs: [publish-images, deploy-staging]
+    if: needs.deploy-staging.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    # Add "Required reviewers" to the production environment in GitHub
+    # settings to make this a manual approval gate.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -q -r backend/requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: staging-deploy-logs
+          path: staging-logs
+      - name: AI release gate (deploy / canary / hold / rollback)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Passed via env (not inlined into the script) to avoid shell injection.
+          CHANGE_SUMMARY: ${{ github.event.head_commit.message || github.sha }}
+        run: |
+          # Exit 0 = deploy/canary, 1 = hold, 2 = rollback -> anything non-zero stops production.
+          set -o pipefail   # keep python's exit code through `tee`
+          cd backend
+          python -m app.analyze_cli recommend --environment production \
+            --change-summary "$CHANGE_SUMMARY" \
+            --tests-passed true --logs ../staging-logs/staging.log | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Configure kubectl
+        id: kube
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::notice::KUBE_CONFIG secret not set for 'production' - skipping deployment."
+            echo "configured=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          mkdir -p ~/.kube && echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+      - name: Deploy (auto-rollback on failure)
+        if: steps.kube.outputs.configured == 'true'
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          bash scripts/deploy.sh production \
+            "${{ needs.publish-images.outputs.backend_image }}" \
+            "${{ needs.publish-images.outputs.frontend_image }}"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.kube.outputs.configured == 'true'
+        with:
+          name: production-deploy-logs
+          path: deploy-logs/

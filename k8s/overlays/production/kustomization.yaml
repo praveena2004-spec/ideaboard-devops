@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ideaboard-production
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+configMapGenerator:
+  - name: backend-config
+    behavior: merge
+    literals:
+      - APP_ENV=production
+
+replicas:
+  - name: backend
+    count: 3
+  - name: frontend
+    count: 2
+
+# Expose the frontend through the cloud provider's load balancer
+# (an Ingress + TLS would be the next step for a real product).
+patches:
+  - target:
+      kind: Service
+      name: frontend
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: LoadBalancer
+
+images:
+  - name: ideaboard-backend
+    newName: ghcr.io/OWNER/ideaboard-backend
+    newTag: latest
+  - name: ideaboard-frontend
+    newName: ghcr.io/OWNER/ideaboard-frontend
+    newTag: latest

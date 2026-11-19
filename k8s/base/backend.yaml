@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend   # nginx in the frontend proxies /api to http://backend:8000
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+spec:
+  replicas: 2
+  # --- Safe rollout / rollback settings ---
+  # Never take an old pod down before a new one is Ready, so a broken release
+  # can't reduce capacity. If new pods don't become Ready within the deadline,
+  # the rollout is marked failed and the pipeline runs `kubectl rollout undo`
+  # (old ReplicaSets are kept for that via revisionHistoryLimit).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  minReadySeconds: 5
+  progressDeadlineSeconds: 120
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: backend
+          image: ideaboard-backend   # rewritten per environment by kustomize `images:`
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: backend-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: ideaboard-db, key: POSTGRES_PASSWORD }
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                # optional: without it the backend uses the rule-based analyzer
+                secretKeyRef: { name: ideaboard-ai, key: ANTHROPIC_API_KEY, optional: true }
+          # --- Health checks ---
+          # startup:   give the app time to boot before other probes count
+          # liveness:  restart the container if the process hangs (/health, no DB)
+          # readiness: only send traffic when the DB is reachable (/ready)
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /ready, port: 8000 }
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+# Evict at most one backend pod at a time during voluntary disruptions (node
+# drains). maxUnavailable (not minAvailable) so a 1-replica staging env can
+# still be drained.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: backend

@@ -1,0 +1,32 @@
+# Base manifests shared by every environment. Environment differences live in
+# overlays/<env>/ (namespace, replicas, config values, image tags).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: ideaboard
+    includeSelectors: false
+
+resources:
+  - postgres.yaml
+  - backend.yaml
+  - frontend.yaml
+
+# Non-secret settings. The generated name gets a content hash, so changing a
+# value triggers a rolling restart automatically.
+configMapGenerator:
+  - name: backend-config
+    literals:
+      - APP_ENV=development
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ideaboard
+      - POSTGRES_USER=ideaboard
+      - AI_MODEL=claude-opus-5-5
+      - SIMULATE_UNHEALTHY=false
+
+# Secrets are NOT stored in git. Create them per namespace (the pipeline does
+# this from GitHub Secrets):
+#   kubectl -n <ns> create secret generic ideaboard-db  --from-literal=POSTGRES_PASSWORD=...
+#   kubectl -n <ns> create secret generic ideaboard-ai  --from-literal=ANTHROPIC_API_KEY=...   (optional)

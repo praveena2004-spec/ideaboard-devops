@@ -1,0 +1,20 @@
+2026-11-19T10:02:11Z Normal   Scheduled  pod/backend-7c9d8f6b5-xk2lp  Successfully assigned ideaboard-staging/backend-7c9d8f6b5-xk2lp
+2026-11-19T10:02:13Z Normal   Pulled     pod/backend-7c9d8f6b5-xk2lp  Container image "ghcr.io/example/ideaboard-backend:4f1a2b3" already present on machine
+2026-11-19T10:02:14Z Normal   Started    pod/backend-7c9d8f6b5-xk2lp  Started container backend
+--- container logs (previous) ---
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+ERROR:    Traceback (most recent call last):
+  File "/app/app/main.py", line 37, in lifespan
+    Base.metadata.create_all(bind=engine)
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 145, in __init__
+    self._dbapi_connection = engine.raw_connection()
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) could not connect to server: Connection refused
+	Is the server running on host "postgres-wrong" (10.96.12.4) and accepting TCP/IP connections on port 5432?
+ERROR:    Application startup failed. Exiting.
+--- events ---
+2026-11-19T10:02:25Z Warning  Unhealthy  pod/backend-7c9d8f6b5-xk2lp  Readiness probe failed: Get "http://10.244.1.17:8000/ready": dial tcp 10.244.1.17:8000: connect: connection refused
+2026-11-19T10:02:40Z Warning  BackOff    pod/backend-7c9d8f6b5-xk2lp  Back-off restarting failed container backend in pod backend-7c9d8f6b5-xk2lp
+2026-11-19T10:03:10Z Warning  BackOff    pod/backend-7c9d8f6b5-xk2lp  Back-off restarting failed container backend (CrashLoopBackOff)
+Waiting for deployment "backend" rollout to finish: 1 old replicas are pending termination...
+error: deployment "backend" exceeded its progress deadline

@@ -1,0 +1,28 @@
+# Secrets / local config
+.env
+# staging/production .tfvars hold only non-secret sizing and are committed;
+# keep anything sensitive in these instead:
+secrets.tfvars
+*.auto.tfvars
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.db
+
+# Node
+node_modules/
+dist/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+crash.log
+
+# Pipeline artifacts
+deploy-logs/
