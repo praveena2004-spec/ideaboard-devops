@@ -14,7 +14,7 @@ project. It includes:
 
 | Cloud | URL | Status |
 |---|---|---|
-| AWS (k3s on EC2 + RDS PostgreSQL, us-east-1) | _torn down_ (was http://3.234.255.223/) | ✅ Deployed and verified on 2026-11-19: provisioned with `scripts/infra.sh aws free-tier apply` (22 resources), deployed by the pipeline (rollout + public smoke test + AI analysis *healthy → proceed*, gate *canary*), then destroyed with `scripts/infra.sh aws free-tier destroy` to stop using free-tier resources. Re-create it with the commands in [section 3](#3-deploy-to-a-cloud-with-the-pipeline). |
+| AWS (k3s on EC2 + RDS PostgreSQL, us-east-1) | **http://100.53.43.210/** | ✅ Live. Provisioned with `scripts/infra.sh aws free-tier apply` (22 resources), deployed by the pipeline (rollout + public smoke test + AI analysis + AI release gate, all green) |
 | GCP (k3s on Compute Engine + Cloud SQL) | _pending_ | Infrastructure code validated; needs a GCP project |
 
 ## Verification status
