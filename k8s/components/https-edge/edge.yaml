@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-caddyfile
+data:
+  Caddyfile: |
+    {$SITE_ADDRESS} {
+      encode gzip
+      reverse_proxy frontend:80
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge
+spec:
+  type: LoadBalancer
+  selector:
+    app: edge
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443
+---
+# Certificates are kept on a small volume so restarts don't re-request them
+# (Let's Encrypt rate limits). Recreate strategy: the volume is ReadWriteOnce.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: edge-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: edge
+  template:
+    metadata:
+      labels:
+        app: edge
+    spec:
+      containers:
+        - name: caddy
+          image: caddy:2.10-alpine
+          ports:
+            - containerPort: 80
+            - containerPort: 443
+          envFrom:
+            - configMapRef:
+                name: edge-config
+          readinessProbe:
+            tcpSocket: { port: 80 }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 80 }
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 20m, memory: 24Mi }
+            limits: { memory: 96Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+          volumeMounts:
+            - name: caddyfile
+              mountPath: /etc/caddy
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: caddyfile
+          configMap:
+            name: edge-caddyfile
+        - name: data
+          persistentVolumeClaim:
+            claimName: edge-data

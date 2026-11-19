@@ -10,6 +10,10 @@ resources:
   - namespace.yaml
   - ../../base
 
+# Public entry point with automatic HTTPS (Caddy + Let's Encrypt).
+components:
+  - ../../components/https-edge
+
 configMapGenerator:
   - name: backend-config
     behavior: merge
@@ -23,13 +27,6 @@ replicas:
     count: 1
 
 patches:
-  # Public entry point. On k3s, ServiceLB binds a LoadBalancer Service to the
-  # node's port 80; on EKS/GKE it provisions a cloud load balancer.
-  - target: { kind: Service, name: frontend }
-    patch: |-
-      - op: add
-        path: /spec/type
-        value: LoadBalancer
   # Small requests so everything fits on a 1 GB free-tier VM.
   - target: { kind: Deployment, name: backend }
     patch: |-

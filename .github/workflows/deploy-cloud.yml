@@ -59,6 +59,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SIMULATE_UNHEALTHY: ${{ inputs.simulate_bad_release && 'true' || 'false' }}
           AI_ENV_GOAL: ${{ inputs.environment_goal }}
+          PUBLIC_HOST: ${{ vars.PUBLIC_HOST }}
           BACKEND_IMAGE: ${{ inputs.backend_image }}
           FRONTEND_IMAGE: ${{ inputs.frontend_image }}
         run: |

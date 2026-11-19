@@ -36,6 +36,9 @@ mkdir -p "$SECRETS_DIR"
 
 tf() { "$TERRAFORM" -chdir="$TF_DIR" "$@"; }
 out() { tf output -raw "$1"; }
+# Free DNS name for the VM's IP (1.2.3.4 -> 1-2-3-4.sslip.io), so the HTTPS edge
+# can get a real Let's Encrypt certificate without buying a domain.
+public_host() { local ip; ip="$(out public_ip)"; echo "${ip//./-}.sslip.io"; }
 
 init() {
   tf init -input=false >/dev/null
@@ -72,12 +75,12 @@ case "$CMD" in
   output)  init; tf output ;;
   kubeconfig) init; fetch_kubeconfig ;;
   wait-app)
-    init; ip="$(out public_ip)"
+    init; host="$(public_host)"
     for _ in $(seq 1 60); do
-      curl -fsS -o /dev/null "http://$ip/" && curl -fsS "http://$ip/api/version" && { echo; echo "App is up: http://$ip/"; exit 0; }
+      curl -fsS -o /dev/null "https://$host/" && curl -fsS "https://$host/api/version" && { echo; echo "App is up: https://$host/"; exit 0; }
       sleep 10
     done
-    echo "App not reachable on http://$ip/"; exit 1 ;;
+    echo "App not reachable on https://$host/"; exit 1 ;;
   deploy-env)
     init
     echo "export POSTGRES_HOST='$(out database_host)'"
@@ -85,6 +88,7 @@ case "$CMD" in
     echo "export POSTGRES_DB='$(out database_name)'"
     echo "export POSTGRES_USER='$(out database_username)'"
     echo "export POSTGRES_PASSWORD='$(out database_password)'"
+    echo "export PUBLIC_HOST='$(public_host)'"
     [[ -f "$KUBECONFIG_FILE" ]] && echo "export KUBECONFIG='$KUBECONFIG_FILE'" ;;
   github-secrets)
     # One GitHub environment per cloud; the pipeline deploys to each of them.
@@ -98,7 +102,10 @@ case "$CMD" in
     out database_username | "$GH" secret set POSTGRES_USER --env "$CLOUD"
     out database_password | "$GH" secret set POSTGRES_PASSWORD --env "$CLOUD"
     ip="$(out public_ip)"
-    [[ -n "$ip" && "$ip" != "null" ]] && "$GH" variable set APP_URL --env "$CLOUD" --body "http://$ip/"
+    if [[ -n "$ip" && "$ip" != "null" ]]; then
+      "$GH" variable set PUBLIC_HOST --env "$CLOUD" --body "$(public_host)"
+      "$GH" variable set APP_URL --env "$CLOUD" --body "https://$(public_host)/"
+    fi
     echo "GitHub environment '$CLOUD' configured for $repo" ;;
   *) echo "Unknown command: $CMD"; exit 1 ;;
 esac

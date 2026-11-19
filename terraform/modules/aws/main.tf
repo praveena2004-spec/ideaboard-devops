@@ -98,6 +98,15 @@ resource "aws_vpc_security_group_ingress_rule" "node_http" {
   to_port           = 80
 }
 
+resource "aws_vpc_security_group_ingress_rule" "node_https" {
+  security_group_id = aws_security_group.node.id
+  description       = "Public HTTPS to the app"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}
+
 resource "aws_vpc_security_group_ingress_rule" "node_admin" {
   for_each          = local.is_k3s ? { for pair in setproduct(var.admin_cidrs, [22, 6443]) : "${pair[0]}-${pair[1]}" => pair } : {}
   security_group_id = aws_security_group.node.id

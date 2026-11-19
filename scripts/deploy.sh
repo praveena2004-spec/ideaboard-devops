@@ -19,6 +19,7 @@
 #   POSTGRES_HOST, POSTGRES_PASSWORD   database connection -> secret ideaboard-db
 #   POSTGRES_PORT/DB/USER              (defaults 5432 / ideaboard / ideaboard)
 #   ANTHROPIC_API_KEY   optional -> secret ideaboard-ai (and enables LLM analysis here)
+#   PUBLIC_HOST         optional public hostname for the HTTPS edge, e.g. 1-2-3-4.sslip.io
 #   AI_ENV_GOAL         optional, e.g. "cost-sensitive staging": AI sizes replicas/resources
 #   AI_ROLLBACK         "true" (default): allow a high-confidence LLM verdict to roll back
 #   SIMULATE_UNHEALTHY  "true": deploy a deliberately broken backend to demo rollback
@@ -107,6 +108,18 @@ EOF
   patches=$((patches+1))
 fi
 [[ $patches -eq 0 ]] && sed -i '/^patches:$/d' "$WRAP/kustomization.yaml"
+if [[ -n "${PUBLIC_HOST:-}" ]] && grep -q "https-edge" "$OVERLAY/kustomization.yaml"; then
+  # Public hostname for the HTTPS edge (Let's Encrypt certificate). Hashed
+  # into the ConfigMap name, so a change restarts the edge automatically.
+  log "Public hostname: $PUBLIC_HOST (HTTPS via Let's Encrypt)"
+  cat >> "$WRAP/kustomization.yaml" <<EOF
+configMapGenerator:
+  - name: edge-config
+    behavior: merge
+    literals:
+      - SITE_ADDRESS=$PUBLIC_HOST
+EOF
+fi
 
 RENDERED="$LOG_DIR/rendered-$OVERLAY_NAME.yaml"
 log "Rendering $OVERLAY_NAME"
@@ -121,6 +134,10 @@ reason=""
 if kubectl -n "$NS" get statefulset postgres >/dev/null 2>&1; then
   log "Waiting for in-cluster postgres"
   kubectl -n "$NS" rollout status statefulset/postgres --timeout="$TIMEOUT" || { healthy=false; reason="postgres not ready"; }
+fi
+if kubectl -n "$NS" get deployment edge >/dev/null 2>&1; then
+  log "Waiting for the HTTPS edge"
+  kubectl -n "$NS" rollout status deployment/edge --timeout="$TIMEOUT" || { healthy=false; reason="edge not ready"; }
 fi
 for d in "${APP_DEPLOYMENTS[@]}"; do
   if $healthy; then

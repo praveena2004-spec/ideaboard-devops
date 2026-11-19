@@ -1,0 +1,18 @@
+# Optional component: public HTTPS entry point.
+# Caddy terminates TLS with an automatic Let's Encrypt certificate, redirects
+# HTTP -> HTTPS and proxies to the frontend Service. Cloud-neutral: works on
+# k3s (ServiceLB binds ports 80/443 on the node) and on EKS/GKE (cloud LB).
+#
+# SITE_ADDRESS is the public hostname, set per deployment by scripts/deploy.sh
+# from PUBLIC_HOST (e.g. 100-53-43-210.sslip.io, a free DNS name for an IP).
+# The default ":80" serves plain HTTP when no hostname is known.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - edge.yaml
+
+configMapGenerator:
+  - name: edge-config
+    literals:
+      - SITE_ADDRESS=:80

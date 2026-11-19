@@ -83,12 +83,12 @@ resource "google_compute_firewall" "web" {
   project       = var.project_id
   name          = "${local.prefix}-web"
   network       = google_compute_network.this.name
-  description   = "Public HTTP to the app"
+  description   = "Public HTTP and HTTPS to the app"
   source_ranges = ["0.0.0.0/0"]
   target_tags   = [local.vm_tag]
   allow {
     protocol = "tcp"
-    ports    = ["80"]
+    ports    = ["80", "443"]
   }
 }
 
