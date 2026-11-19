@@ -14,8 +14,32 @@ project. It includes:
 
 | Cloud | URL | Status |
 |---|---|---|
-| AWS (k3s on EC2 + RDS PostgreSQL, us-east-1) | **http://100.53.43.210/** | ✅ Live. Provisioned with `scripts/infra.sh aws free-tier apply` (22 resources), deployed by the pipeline (rollout + public smoke test + AI analysis + AI release gate, all green) |
+| AWS (k3s on EC2 + RDS PostgreSQL, us-east-1) | **https://100-53-43-210.sslip.io/** | ✅ Live. Provisioned with `scripts/infra.sh aws free-tier apply` (22 resources), deployed by the pipeline (rollout + public smoke test + AI analysis + AI release gate, all green) |
 | GCP (k3s on Compute Engine + Cloud SQL) | _pending_ | Infrastructure code validated; needs a GCP project |
+
+The live site uses HTTPS with a Let's Encrypt certificate. `sslip.io` is a free DNS service that maps the
+hostname to the server's IP, so no domain purchase was needed.
+
+## How to review (about 10 minutes)
+
+1. **Use the live app:** open https://100-53-43-210.sslip.io/
+   * **Ideas** (left): add an idea. It is stored in the managed RDS PostgreSQL database.
+   * **AI Deployment Assistant:** click *Load failing logs → Analyze logs*, then *Load healthy logs → Analyze logs*.
+   * **AI Environment Planner:** click *high-availability production → Plan*, then *cost-sensitive staging → Plan*.
+   * API docs: https://100-53-43-210.sslip.io/api/ideas (JSON). `POST /api/ideas` takes `{"content": "..."}`.
+2. **See the pipeline run:** [Actions → CI/CD](https://github.com/praveena2004-spec/ideaboard-devops/actions/workflows/ci-cd.yml).
+   Open the latest run on `main`. Each job's **Summary** shows the AI log analysis, the AI release gate decision and the deploy result.
+3. **Read the key code** (each file is short and commented):
+
+   | What | File |
+   |---|---|
+   | AI features (analysis, rollback verdict, release gate, environment planning) | [backend/app/ai.py](backend/app/ai.py) |
+   | Deploy with automatic rollback | [scripts/deploy.sh](scripts/deploy.sh) |
+   | Pipeline | [.github/workflows/ci-cd.yml](.github/workflows/ci-cd.yml), [deploy-cloud.yml](.github/workflows/deploy-cloud.yml) |
+   | Cloud-agnostic IaC | [terraform/modules/aws/main.tf](terraform/modules/aws/main.tf), [terraform/modules/gcp/main.tf](terraform/modules/gcp/main.tf) |
+   | Kubernetes | [k8s/](k8s/) |
+
+4. **Run it yourself:** `docker compose up --build` (see [section 2](#2-run-locally-with-docker-compose)).
 
 ## Verification status
 
@@ -68,6 +92,7 @@ EKS/GKE it becomes a cloud load balancer.
 
 | Component | Choice | Why |
 |---|---|---|
+| Edge | Caddy (HTTPS, automatic Let's Encrypt certificate, HTTP→HTTPS redirect) | One public entry point on every cloud |
 | Frontend | React + Vite, served by `nginx-unprivileged` | Static build, non-root container, `/api` proxy so the browser sees one origin |
 | Backend | FastAPI + SQLAlchemy | `GET/POST /api/ideas`, `/health` (liveness), `/ready` (readiness incl. DB), AI endpoints |
 | Database | PostgreSQL 16, table `ideas(id, content, created_at)` | Managed in the cloud (RDS / Cloud SQL), container locally |

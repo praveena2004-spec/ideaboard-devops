@@ -69,6 +69,8 @@ jobs:
       - name: Public URL check
         if: steps.deploy.outputs.deployed == 'true' && vars.APP_URL != ''
         run: |
+          # On a first deploy the HTTPS edge needs ~30-60 s to obtain its certificate.
+          for i in $(seq 1 18); do curl -fsS -o /dev/null "$APP_URL" && break; echo "waiting for $APP_URL ($i)"; sleep 10; done
           READ_ONLY=1 bash scripts/smoke_test.sh "${APP_URL%/}"
           echo "Live at ${APP_URL}" >> "$GITHUB_STEP_SUMMARY"
         env:
