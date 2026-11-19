@@ -16,7 +16,8 @@ log analysis and release recommendations** (Claude, with a rule-based fallback).
 | AI analyzer CLI (rule-based path) on sample logs | ✅ Tested locally |
 | Kubernetes manifests (staging + production overlays) | ✅ Rendered with `kubectl kustomize` and schema-validated with `kubeconform` |
 | Terraform `fmt` / `validate` for AWS and GCP roots | ✅ Validated locally (no `plan`/`apply`) |
-| Docker images + `docker compose up` | ⚠️ Not run locally (no Docker on the build machine). The CI job `compose-smoke-test` builds and tests the full stack on every push. |
+| Docker images + `docker compose up` | ✅ Built and smoke-tested end to end by the CI job `compose-smoke-test` (GitHub Actions, Ubuntu) |
+| Image publishing to GHCR | ✅ Verified in CI (`ghcr.io/<owner>/ideaboard-backend`, `ideaboard-frontend`) |
 | LLM path against the real Claude API | ⚠️ Request/response handling is tested with a mocked client only; no live API key was used |
 | Deploying to AWS (EKS) / GCP (GKE) | ❌ **Not verified.** Terraform is valid but has never been applied. |
 | Automatic rollback on a real cluster | ❌ **Not verified.** Implemented in `scripts/deploy.sh` (render logic tested); needs a real cluster run (see [Rollback demo](#rollback-demo)). |
