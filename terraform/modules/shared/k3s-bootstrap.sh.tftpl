@@ -1,0 +1,28 @@
+#!/bin/bash
+# Cloud-neutral bootstrap for the single-VM "k3s" cluster flavor. Used as EC2
+# user_data (AWS) and as the startup-script (GCP); only the command that looks
+# up the VM's public IP differs per cloud and is passed in by the module.
+set -euxo pipefail
+
+# Idempotent: GCP runs startup-scripts on every boot.
+if [ -f /var/lib/ideaboard-bootstrapped ]; then exit 0; fi
+
+# 1 GB free-tier VMs need swap to run Kubernetes comfortably.
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+PUBLIC_IP="$(${public_ip_cmd})"
+
+# k3s = lightweight, CNCF-certified Kubernetes. Traefik and metrics-server are
+# disabled to save memory; ServiceLB stays on and exposes LoadBalancer
+# Services on the node's port 80.
+curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=stable sh -s - server \
+  --disable traefik \
+  --disable metrics-server \
+  --write-kubeconfig-mode 600 \
+  --tls-san "$PUBLIC_IP" \
+  --node-external-ip "$PUBLIC_IP"
+
+touch /var/lib/ideaboard-bootstrapped

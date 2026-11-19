@@ -106,3 +106,47 @@ def test_llm_refusal_falls_back_to_rules(monkeypatch):
     r = ai.analyze_logs("Back-off restarting failed container")
     assert r.source == "rules"
     assert "LLM unavailable" in r.note
+
+
+# ---------- AI environment planning ----------
+from app.schemas import EnvironmentPlan  # noqa: E402
+
+
+def test_plan_rules_cost_vs_ha():
+    cheap = ai.plan_environment("cost-sensitive staging")
+    assert (cheap.cluster_flavor, cheap.backend_replicas, cheap.db_high_availability) == ("k3s", 1, False)
+    ha = ai.plan_environment("high-availability production")
+    assert ha.cluster_flavor == "managed" and ha.backend_replicas >= 3 and ha.db_high_availability
+
+
+def test_plan_guardrails_clamp_llm_output(monkeypatch):
+    wild = {**LLM_PLAN, "backend_replicas": 500, "backend_memory_limit_mib": 64, "node_count": 4}
+    monkeypatch.setattr(settings, "anthropic_api_key", "test-key")
+    monkeypatch.setattr(anthropic, "Anthropic", _fake_client("end_turn", wild, {}))
+    r = ai.plan_environment("whatever")
+    assert r.source == "llm"
+    assert r.backend_replicas == 10 and r.backend_memory_limit_mib == 128
+    assert r.node_count == 1  # k3s is a single VM
+    assert len(r.adjustments) == 3
+
+
+LLM_PLAN = EnvironmentPlan(
+    profile_name="x", cluster_flavor="k3s", node_size="small", node_count=1, backend_replicas=1,
+    frontend_replicas=1, backend_cpu_request_millicores=100, backend_memory_limit_mib=256,
+    db_size="micro", db_high_availability=False, rationale=["r"],
+).model_dump()
+
+
+def test_plan_renders_patch_and_tfvars(client):
+    r = client.post("/api/ai/environment-plan", json={"goal": "cheap demo"}).json()
+    assert r["profile_name"] == "cost-optimised"
+    plan = ai.plan_environment("cheap demo")
+    assert "replicas: 1" in ai.plan_to_kustomize_patch(plan)
+    assert 'cluster_flavor   = "k3s"' in ai.plan_to_tfvars(plan)
+
+
+def test_real_kind_healthy_rollout_is_not_flagged():
+    """Regression: real logs from a successful kind rollout (with normal startup
+    probe failures and readiness 503s) must not be reported as degraded."""
+    r = ai.analyze_logs((SAMPLES / "kind-healthy-deploy.log").read_text(encoding="utf-8"))
+    assert (r.status, r.recommendation) == ("healthy", "proceed")

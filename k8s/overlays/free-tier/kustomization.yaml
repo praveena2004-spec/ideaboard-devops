@@ -1,0 +1,51 @@
+# Free-tier cloud environment: a single 1 GB VM running k3s (see Terraform
+# `cluster_flavor = "k3s"`) plus the cloud's managed PostgreSQL. Same overlay
+# for AWS and GCP - only the ideaboard-db Secret differs per cloud.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ideaboard
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+configMapGenerator:
+  - name: backend-config
+    behavior: merge
+    literals:
+      - APP_ENV=production
+
+replicas:
+  - name: backend
+    count: 1
+  - name: frontend
+    count: 1
+
+patches:
+  # Public entry point. On k3s, ServiceLB binds a LoadBalancer Service to the
+  # node's port 80; on EKS/GKE it provisions a cloud load balancer.
+  - target: { kind: Service, name: frontend }
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: LoadBalancer
+  # Small requests so everything fits on a 1 GB free-tier VM.
+  - target: { kind: Deployment, name: backend }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: { requests: { cpu: 50m, memory: 96Mi }, limits: { memory: 256Mi } }
+  - target: { kind: Deployment, name: frontend }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: { requests: { cpu: 20m, memory: 16Mi }, limits: { memory: 64Mi } }
+
+images:
+  - name: ideaboard-backend
+    newName: ghcr.io/OWNER/ideaboard-backend
+    newTag: latest
+  - name: ideaboard-frontend
+    newName: ghcr.io/OWNER/ideaboard-frontend
+    newTag: latest

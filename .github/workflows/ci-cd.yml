@@ -3,17 +3,18 @@
 #  PR / push:   backend tests + AI log-analysis demo, frontend build,
 #               Terraform + Kubernetes validation, Docker build,
 #               full docker-compose smoke test
-#  push main:   also push images to GHCR, deploy to staging (auto-rollback on
-#               failure), AI release gate, then production (manual approval)
+#  push main:   push images to GHCR, then a progressive multi-cloud rollout:
+#               deploy AWS (AI analysis, auto-rollback) -> AI release gate on
+#               the AWS logs -> deploy GCP. Same images, same manifests.
 #
 # Secrets (Settings -> Secrets and variables -> Actions / Environments):
-#   ANTHROPIC_API_KEY  repo secret, optional  - enables LLM analysis (rules otherwise)
-#   KUBE_CONFIG        environment secret in "staging" and "production":
-#                      base64 of a kubeconfig (`base64 -w0 ~/.kube/config`).
-#                      If missing, the deploy jobs skip with a notice.
-#   POSTGRES_PASSWORD  environment secret in "staging" and "production"
+#   ANTHROPIC_API_KEY  repo secret, optional - enables LLM analysis (rules otherwise)
+#   Per GitHub Environment "aws" / "gcp" (set by `scripts/infra.sh <cloud> <env> github-secrets`):
+#     KUBE_CONFIG, POSTGRES_HOST, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, var APP_URL
+#   A cloud without KUBE_CONFIG is skipped with a notice.
 # Images go to GitHub Container Registry using the built-in GITHUB_TOKEN, so no
 # registry credentials are needed and the build is cloud-agnostic.
+# Adding a third cloud = one more `uses: ./.github/workflows/deploy-cloud.yml` job.
 
 name: CI/CD
 
@@ -24,9 +25,13 @@ on:
   workflow_dispatch:
     inputs:
       simulate_bad_release:
-        description: "Deploy a deliberately unhealthy backend to staging to demo rollback"
+        description: "Deploy a deliberately unhealthy backend to AWS to demo the automatic rollback"
         type: boolean
         default: false
+      environment_goal:
+        description: 'Optional AI sizing goal, e.g. "cost-sensitive staging" or "high-availability production"'
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -94,7 +99,7 @@ jobs:
       - name: Validate Kubernetes manifests (kustomize + kubeconform)
         run: |
           curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
-          for env in staging production; do
+          for env in local free-tier staging production; do
             kubectl kustomize "k8s/overlays/$env" | ./kubeconform -strict -summary -
           done
 
@@ -169,54 +174,25 @@ jobs:
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-  deploy-staging:
+  # ---------------- progressive multi-cloud rollout ----------------
+  deploy-aws:
     needs: publish-images
-    runs-on: ubuntu-latest
-    environment: staging
-    outputs:
-      deployed: ${{ steps.deploy.outputs.deployed }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install -q -r backend/requirements.txt   # for the AI analyzer
-      - name: Configure kubectl
-        id: kube
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          if [ -z "$KUBE_CONFIG" ]; then
-            echo "::notice::KUBE_CONFIG secret not set for 'staging' - skipping deployment."
-            echo "configured=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          mkdir -p ~/.kube && echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config
-          echo "configured=true" >> "$GITHUB_OUTPUT"
-      - name: Deploy (auto-rollback on failure)
-        id: deploy
-        if: steps.kube.outputs.configured == 'true'
-        env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SIMULATE_UNHEALTHY: ${{ inputs.simulate_bad_release && 'true' || 'false' }}
-        run: |
-          bash scripts/deploy.sh staging \
-            "${{ needs.publish-images.outputs.backend_image }}" \
-            "${{ needs.publish-images.outputs.frontend_image }}"
-          echo "deployed=true" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.kube.outputs.configured == 'true'
-        with:
-          name: staging-deploy-logs
-          path: deploy-logs/
+    uses: ./.github/workflows/deploy-cloud.yml
+    secrets: inherit
+    with:
+      cloud: aws
+      overlay: free-tier
+      backend_image: ${{ needs.publish-images.outputs.backend_image }}
+      frontend_image: ${{ needs.publish-images.outputs.frontend_image }}
+      simulate_bad_release: ${{ inputs.simulate_bad_release || false }}
+      environment_goal: ${{ inputs.environment_goal || '' }}
 
-  deploy-production:
-    needs: [publish-images, deploy-staging]
-    if: needs.deploy-staging.outputs.deployed == 'true'
+  ai-release-gate:
+    # AWS acts as the canary cloud: the AI reads its rollout logs and decides
+    # whether the release may continue to the next cloud.
+    needs: deploy-aws
+    if: needs.deploy-aws.outputs.deployed == 'true'
     runs-on: ubuntu-latest
-    # Add "Required reviewers" to the production environment in GitHub
-    # settings to make this a manual approval gate.
-    environment: production
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -225,42 +201,31 @@ jobs:
       - run: pip install -q -r backend/requirements.txt
       - uses: actions/download-artifact@v4
         with:
-          name: staging-deploy-logs
-          path: staging-logs
+          name: deploy-logs-aws
+          path: aws-logs
       - name: AI release gate (deploy / canary / hold / rollback)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Passed via env (not inlined into the script) to avoid shell injection.
           CHANGE_SUMMARY: ${{ github.event.head_commit.message || github.sha }}
         run: |
-          # Exit 0 = deploy/canary, 1 = hold, 2 = rollback -> anything non-zero stops production.
+          # Exit 0 = deploy/canary, 1 = hold, 2 = rollback -> anything non-zero stops the rollout.
           set -o pipefail   # keep python's exit code through `tee`
           cd backend
           python -m app.analyze_cli recommend --environment production \
             --change-summary "$CHANGE_SUMMARY" \
-            --tests-passed true --logs ../staging-logs/staging.log | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Configure kubectl
-        id: kube
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          if [ -z "$KUBE_CONFIG" ]; then
-            echo "::notice::KUBE_CONFIG secret not set for 'production' - skipping deployment."
-            echo "configured=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          mkdir -p ~/.kube && echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config
-          echo "configured=true" >> "$GITHUB_OUTPUT"
-      - name: Deploy (auto-rollback on failure)
-        if: steps.kube.outputs.configured == 'true'
-        env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          bash scripts/deploy.sh production \
-            "${{ needs.publish-images.outputs.backend_image }}" \
-            "${{ needs.publish-images.outputs.frontend_image }}"
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.kube.outputs.configured == 'true'
-        with:
-          name: production-deploy-logs
-          path: deploy-logs/
+            --tests-passed true --logs ../aws-logs/free-tier.log | tee -a "$GITHUB_STEP_SUMMARY"
+
+  deploy-gcp:
+    needs: [publish-images, deploy-aws, ai-release-gate]
+    # Runs when AWS succeeded (or was skipped because it isn't provisioned) and
+    # the gate didn't stop the release.
+    if: always() && needs.publish-images.result == 'success' && needs.deploy-aws.result == 'success' && needs.ai-release-gate.result != 'failure'
+    uses: ./.github/workflows/deploy-cloud.yml
+    secrets: inherit
+    with:
+      cloud: gcp
+      overlay: free-tier
+      backend_image: ${{ needs.publish-images.outputs.backend_image }}
+      frontend_image: ${{ needs.publish-images.outputs.frontend_image }}
+      environment_goal: ${{ inputs.environment_goal || '' }}

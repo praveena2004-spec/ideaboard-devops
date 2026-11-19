@@ -8,6 +8,7 @@ Endpoints
   POST /api/ideas                      create an idea
   POST /api/ai/analyze-logs            AI deployment log analysis
   POST /api/ai/deployment-recommendation  AI deploy/canary/hold/rollback decision
+  POST /api/ai/environment-plan        AI goal -> environment sizing (validated)
 """
 import logging
 from contextlib import asynccontextmanager
@@ -24,6 +25,8 @@ from .models import Idea
 from .schemas import (
     DeploymentRecommendationOut,
     DeploymentSignals,
+    EnvironmentGoal,
+    EnvironmentPlanOut,
     IdeaCreate,
     IdeaOut,
     LogAnalysisOut,
@@ -34,11 +37,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("ideaboard")
 
 
+_schema_ready = False
+
+
+def ensure_schema() -> bool:
+    """Create the table if needed. Never raises: if the database isn't reachable
+    yet (e.g. it starts after the backend), the pod just stays not-ready and
+    /ready retries - instead of crashing into CrashLoopBackOff.
+    For a real product you'd use Alembic migrations; create_all is idempotent."""
+    global _schema_ready
+    if not _schema_ready:
+        try:
+            Base.metadata.create_all(bind=engine)
+            _schema_ready = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Database not available yet (%s); will retry on /ready", type(exc).__name__)
+    return _schema_ready
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Creates the table on first start. For a real product you'd use Alembic
-    # migrations; create_all is idempotent and enough for this MVP.
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     log.info("Started env=%s version=%s ai=%s", settings.app_env, settings.app_version,
              "llm" if settings.anthropic_api_key else "rules")
     yield
@@ -72,6 +91,9 @@ def ready(response: Response, db: Session = Depends(get_db)):
         log.error("Readiness check failed: %s", exc)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "unhealthy", "reason": "database unreachable"}
+    if not ensure_schema():
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "unhealthy", "reason": "schema not initialised"}
     return {"status": "ready"}
 
 
@@ -88,10 +110,10 @@ def list_ideas(db: Session = Depends(get_db)):
 
 @app.post("/api/ideas", response_model=IdeaOut, status_code=status.HTTP_201_CREATED)
 def create_idea(payload: IdeaCreate, db: Session = Depends(get_db)):
-    title = payload.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="title must not be blank")
-    idea = Idea(title=title, description=payload.description.strip())
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content must not be blank")
+    idea = Idea(content=content)
     db.add(idea)
     db.commit()
     db.refresh(idea)
@@ -105,6 +127,11 @@ def analyze_logs(payload: LogAnalysisRequest):
         return ai.analyze_logs(payload.logs, payload.context)
     except ai.LogTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+
+@app.post("/api/ai/environment-plan", response_model=EnvironmentPlanOut)
+def environment_plan(payload: EnvironmentGoal):
+    return ai.plan_environment(payload.goal)
 
 
 @app.post("/api/ai/deployment-recommendation", response_model=DeploymentRecommendationOut)

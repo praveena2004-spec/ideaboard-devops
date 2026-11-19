@@ -5,7 +5,8 @@ from .config import settings
 
 _url = settings.database_url
 # SQLite (used only by the test suite) needs this flag for FastAPI's threads.
-_connect_args = {"check_same_thread": False} if _url.startswith("sqlite") else {}
+# For Postgres, fail fast instead of hanging when the database is unreachable.
+_connect_args = {"check_same_thread": False} if _url.startswith("sqlite") else {"connect_timeout": 5}
 
 # pool_pre_ping drops dead connections, e.g. after a Postgres restart.
 engine = create_engine(_url, pool_pre_ping=True, connect_args=_connect_args)

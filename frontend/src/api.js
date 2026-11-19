@@ -21,5 +21,7 @@ export const createIdea = (idea) =>
 export const getVersion = () => request("/api/version");
 export const analyzeLogs = (logs, context) =>
   request("/api/ai/analyze-logs", { method: "POST", body: JSON.stringify({ logs, context }) });
+export const planEnvironment = (goal) =>
+  request("/api/ai/environment-plan", { method: "POST", body: JSON.stringify({ goal }) });
 export const recommendDeployment = (signals) =>
   request("/api/ai/deployment-recommendation", { method: "POST", body: JSON.stringify(signals) });

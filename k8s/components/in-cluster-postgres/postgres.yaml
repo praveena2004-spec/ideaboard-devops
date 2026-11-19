@@ -1,5 +1,5 @@
-# In-cluster PostgreSQL for the MVP. For production, prefer a managed database
-# (Amazon RDS / Cloud SQL) and point POSTGRES_HOST at it instead.
+# In-cluster PostgreSQL for local clusters. Reads its credentials from the
+# same `ideaboard-db` Secret as the backend (POSTGRES_HOST must be "postgres").
 apiVersion: v1
 kind: Service
 metadata:
@@ -34,10 +34,10 @@ spec:
           env:
             - name: POSTGRES_DB
               valueFrom:
-                configMapKeyRef: { name: backend-config, key: POSTGRES_DB }
+                secretKeyRef: { name: ideaboard-db, key: POSTGRES_DB }
             - name: POSTGRES_USER
               valueFrom:
-                configMapKeyRef: { name: backend-config, key: POSTGRES_USER }
+                secretKeyRef: { name: ideaboard-db, key: POSTGRES_USER }
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef: { name: ideaboard-db, key: POSTGRES_PASSWORD }
@@ -54,7 +54,7 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
+            requests: { cpu: 100m, memory: 128Mi }
             limits: { memory: 512Mi }
           volumeMounts:
             - name: data

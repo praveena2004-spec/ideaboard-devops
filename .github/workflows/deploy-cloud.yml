@@ -1,0 +1,79 @@
+# Reusable deploy workflow - identical for every cloud. The cloud only decides
+# which GitHub Environment (and therefore which secrets) is used:
+#   KUBE_CONFIG        base64 kubeconfig   (scripts/infra.sh <cloud> <env> github-secrets sets all of these)
+#   POSTGRES_HOST / POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD   managed database
+#   vars.APP_URL       public URL, smoke-tested after the rollout
+# Missing KUBE_CONFIG = that cloud isn't provisioned yet -> the job skips with a notice.
+
+name: Deploy to cloud
+
+on:
+  workflow_call:
+    inputs:
+      cloud: { type: string, required: true }
+      overlay: { type: string, required: true }
+      backend_image: { type: string, required: true }
+      frontend_image: { type: string, required: true }
+      simulate_bad_release: { type: boolean, default: false }
+      environment_goal: { type: string, default: "" }
+    outputs:
+      deployed:
+        value: ${{ jobs.deploy.outputs.deployed }}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.cloud }}
+      url: ${{ vars.APP_URL }}
+    outputs:
+      deployed: ${{ steps.deploy.outputs.deployed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -r backend/requirements.txt   # for the AI analyzer
+      - name: Configure kubectl
+        id: kube
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::notice::KUBE_CONFIG not set for environment '${{ inputs.cloud }}' - skipping deployment."
+            echo "configured=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          mkdir -p ~/.kube && echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+      - name: Deploy (AI analysis + automatic rollback)
+        id: deploy
+        if: steps.kube.outputs.configured == 'true'
+        env:
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SIMULATE_UNHEALTHY: ${{ inputs.simulate_bad_release && 'true' || 'false' }}
+          AI_ENV_GOAL: ${{ inputs.environment_goal }}
+          BACKEND_IMAGE: ${{ inputs.backend_image }}
+          FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+        run: |
+          echo "## ${{ inputs.cloud }}" >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/deploy.sh "${{ inputs.overlay }}" "$BACKEND_IMAGE" "$FRONTEND_IMAGE"
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+      - name: Public URL check
+        if: steps.deploy.outputs.deployed == 'true' && vars.APP_URL != ''
+        run: |
+          READ_ONLY=1 bash scripts/smoke_test.sh "${APP_URL%/}"
+          echo "Live at ${APP_URL}" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.kube.outputs.configured == 'true'
+        with:
+          name: deploy-logs-${{ inputs.cloud }}
+          path: deploy-logs/

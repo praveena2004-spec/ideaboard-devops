@@ -28,6 +28,8 @@ from .schemas import (
     DeploymentRecommendation,
     DeploymentRecommendationOut,
     DeploymentSignals,
+    EnvironmentPlan,
+    EnvironmentPlanOut,
     LogAnalysis,
     LogAnalysisOut,
 )
@@ -62,6 +64,31 @@ Choose one decision:
 Be conservative for production. Failing tests always mean hold. Give short, concrete \
 reasons tied to the signals you were given, and list checks to run before deploying."""
 
+PLAN_SYSTEM_PROMPT = """You are a platform engineer sizing a Kubernetes environment for \
+a small web app (stateless React/nginx frontend, stateless FastAPI backend, managed \
+PostgreSQL). Turn the developer's high-level goal into concrete settings.
+
+Guidance:
+- cluster_flavor "k3s" = one small VM running lightweight Kubernetes (cheapest, fits cloud \
+free tiers, no redundancy); "managed" = EKS/GKE with a node group (costs more, survives \
+node failure).
+- node_size small/medium/large maps to roughly 1/2/4 vCPU-class burstable instances.
+- Cost-sensitive or free-tier goals: k3s, 1 node, 1 replica each, micro database, no DB HA.
+- High-availability goals: managed, >= 3 nodes, >= 3 backend replicas, >= 2 frontend \
+replicas, DB HA on.
+- The backend uses ~80 MiB at idle; keep its memory limit between 128 and 2048 MiB.
+Explain each choice briefly in rationale, mentioning the cost/availability trade-off."""
+
+# Hard limits applied to every plan, whoever produced it. The LLM proposes,
+# these guardrails decide what is actually allowed.
+_PLAN_LIMITS = {
+    "node_count": (1, 10),
+    "backend_replicas": (1, 10),
+    "frontend_replicas": (1, 10),
+    "backend_cpu_request_millicores": (50, 2000),
+    "backend_memory_limit_mib": (128, 2048),
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -90,6 +117,102 @@ def recommend_deployment(signals: DeploymentSignals) -> DeploymentRecommendation
             log.warning("LLM recommendation failed, using rules: %s", exc)
             return _rule_based_recommendation(signals, note=f"LLM unavailable ({type(exc).__name__}); used rule-based recommendation.")
     return _rule_based_recommendation(signals, note="ANTHROPIC_API_KEY not set; used rule-based recommendation.")
+
+
+def plan_environment(goal: str) -> EnvironmentPlanOut:
+    """High-level goal ("cost-sensitive staging") -> validated environment sizing."""
+    if settings.anthropic_api_key:
+        try:
+            plan = _ask_claude(PLAN_SYSTEM_PROMPT, f"Goal: {goal}", EnvironmentPlan)
+            return _apply_plan_guardrails(plan, source="llm", note="")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("LLM environment planning failed, using rules: %s", exc)
+            return _apply_plan_guardrails(_rule_based_plan(goal), source="rules",
+                                          note=f"LLM unavailable ({type(exc).__name__}); used rule-based plan.")
+    return _apply_plan_guardrails(_rule_based_plan(goal), source="rules",
+                                  note="ANTHROPIC_API_KEY not set; used rule-based plan.")
+
+
+def _apply_plan_guardrails(plan: EnvironmentPlan, source: str, note: str) -> EnvironmentPlanOut:
+    data = plan.model_dump()
+    adjustments: list[str] = []
+    for field, (lo, hi) in _PLAN_LIMITS.items():
+        clamped = max(lo, min(hi, data[field]))
+        if clamped != data[field]:
+            adjustments.append(f"{field} {data[field]} -> {clamped} (allowed {lo}-{hi})")
+            data[field] = clamped
+    if data["cluster_flavor"] == "k3s" and data["node_count"] != 1:
+        adjustments.append(f"node_count {data['node_count']} -> 1 (k3s flavor is a single VM)")
+        data["node_count"] = 1
+    return EnvironmentPlanOut(**data, source=source, note=note, adjustments=adjustments)
+
+
+def _rule_based_plan(goal: str) -> EnvironmentPlan:
+    g = goal.lower()
+    if re.search(r"\b(ha|high[- ]availab\w*|resilien\w*|mission[- ]critical|production)\b", g) \
+            and not re.search(r"\b(cheap|cost|free|budget)\b", g):
+        return EnvironmentPlan(
+            profile_name="high-availability", cluster_flavor="managed", node_size="medium", node_count=3,
+            backend_replicas=3, frontend_replicas=2, backend_cpu_request_millicores=250,
+            backend_memory_limit_mib=512, db_size="small", db_high_availability=True,
+            rationale=["Goal asks for availability: spread 3 backend replicas over 3 managed nodes.",
+                       "Multi-AZ database survives a zone outage, at roughly double the DB cost."],
+        )
+    if re.search(r"\b(perf\w*|high[- ]traffic|load|scale)\b", g):
+        return EnvironmentPlan(
+            profile_name="performance", cluster_flavor="managed", node_size="large", node_count=2,
+            backend_replicas=4, frontend_replicas=2, backend_cpu_request_millicores=500,
+            backend_memory_limit_mib=1024, db_size="medium", db_high_availability=False,
+            rationale=["Goal asks for throughput: larger nodes and more backend replicas.",
+                       "DB HA left off to control cost; enable it for production traffic."],
+        )
+    return EnvironmentPlan(
+        profile_name="cost-optimised", cluster_flavor="k3s", node_size="small", node_count=1,
+        backend_replicas=1, frontend_replicas=1, backend_cpu_request_millicores=50,
+        backend_memory_limit_mib=256, db_size="micro", db_high_availability=False,
+        rationale=["Default / cost-sensitive goal: one free-tier-sized VM running k3s.",
+                   "Single replicas and a micro single-zone database keep cost near zero; no redundancy."],
+    )
+
+
+def plan_to_kustomize_patch(plan: EnvironmentPlanOut) -> str:
+    """Render the plan as a Kustomize patch the deploy script can layer on an overlay."""
+    return f"""# Generated by AI environment planning ({plan.source}) - profile: {plan.profile_name}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+spec:
+  replicas: {plan.backend_replicas}
+  template:
+    spec:
+      containers:
+        - name: backend
+          resources:
+            requests:
+              cpu: {plan.backend_cpu_request_millicores}m
+            limits:
+              memory: {plan.backend_memory_limit_mib}Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: {plan.frontend_replicas}
+"""
+
+
+def plan_to_tfvars(plan: EnvironmentPlanOut) -> str:
+    """Render the infrastructure part of the plan as Terraform variables."""
+    return (
+        f"# Generated by AI environment planning ({plan.source}) - profile: {plan.profile_name}\n"
+        f'cluster_flavor   = "{plan.cluster_flavor}"\n'
+        f'node_size        = "{plan.node_size}"\n'
+        f"node_count       = {plan.node_count}\n"
+        f'db_size          = "{plan.db_size}"\n'
+        f"db_high_availability = {str(plan.db_high_availability).lower()}\n"
+    )
 
 
 class LogTooLargeError(ValueError):
@@ -172,7 +295,8 @@ _RULES: list[tuple[str, str, str, bool, bool]] = [
      "Check that Postgres is running and the host/port settings are correct.", False, True),
     (r"relation .* does not exist|UndefinedTable|column .* does not exist", "Database schema mismatch",
      "Run or fix the schema migration for this release.", True, False),
-    (r"\b5\d\d\b.*(GET|POST)|(GET|POST).*\b5\d\d\b", "HTTP 5xx responses are being served",
+    # Only real API traffic counts; 503s from /ready while starting up are expected.
+    (r'"(GET|POST|PUT|DELETE) /api\S* HTTP/[\d.]+" 5\d\d', "HTTP 5xx responses are being served to API clients",
      "Look at the backend traceback that accompanies the 5xx responses.", False, False),
     (r"Traceback \(most recent call last\)", "Unhandled Python exception",
      "Read the traceback's last frame to find the failing line.", False, False),
@@ -180,6 +304,7 @@ _RULES: list[tuple[str, str, str, bool, bool]] = [
 
 # Written by `kubectl rollout status` and by scripts/deploy.sh.
 _ROLLOUT_SUCCEEDED = re.compile(r"successfully rolled out|rollout result: success", re.IGNORECASE)
+_TRANSIENT_ERROR = re.compile(r"Readiness check failed|connection refused|could not connect", re.IGNORECASE)
 
 
 def _rule_based_log_analysis(logs: str, note: str) -> LogAnalysisOut:
@@ -193,7 +318,12 @@ def _rule_based_log_analysis(logs: str, note: str) -> LogAnalysisOut:
             fixes.append(fix)
             breaking = breaking or is_breaking
 
-    error_lines = len(re.findall(r"\b(ERROR|CRITICAL|FATAL)\b", logs))
+    error_lines = sum(
+        1 for line in logs.splitlines()
+        if re.search(r"\b(ERROR|CRITICAL|FATAL)\b", line)
+        # Readiness errors while the database comes up are normal once the rollout succeeded.
+        and not (rollout_ok and _TRANSIENT_ERROR.search(line))
+    )
     if breaking:
         status, recommendation, confidence = "failed", "rollback", "medium"
     elif issues or error_lines:

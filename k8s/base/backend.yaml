@@ -47,10 +47,11 @@ spec:
           envFrom:
             - configMapRef:
                 name: backend-config
+            # POSTGRES_HOST/PORT/DB/USER/PASSWORD - points at the managed
+            # database of whichever cloud this cluster runs in.
+            - secretRef:
+                name: ideaboard-db
           env:
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: ideaboard-db, key: POSTGRES_PASSWORD }
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 # optional: without it the backend uses the rule-based analyzer

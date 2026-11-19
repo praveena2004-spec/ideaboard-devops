@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Manual rollback of the app deployments in one environment.
+# Manual rollback of the app deployments of one overlay/environment.
 #
-#   scripts/rollback.sh <staging|production> [revision]
+#   scripts/rollback.sh <overlay> [revision]      overlay = free-tier | staging | production | local
 #
 # Without a revision, each deployment goes back to its previous revision.
-# See history first with:  kubectl -n ideaboard-<env> rollout history deployment/backend
+# Inspect history first:  kubectl -n <namespace> rollout history deployment/backend
 set -euo pipefail
-ENVIRONMENT="${1:?usage: rollback.sh <staging|production> [revision]}"
+OVERLAY_NAME="${1:?usage: rollback.sh <overlay> [revision]}"
 REVISION="${2:-}"
-NS="ideaboard-$ENVIRONMENT"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NS="$(sed -n 's/^namespace: *//p' "$ROOT/k8s/overlays/$OVERLAY_NAME/kustomization.yaml")"
 
 for d in backend frontend; do
   if [[ -n "$REVISION" ]]; then

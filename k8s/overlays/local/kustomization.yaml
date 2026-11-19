@@ -1,0 +1,33 @@
+# Local Kubernetes (kind / minikube / Docker Desktop): in-cluster Postgres,
+# single replicas. Deploy with POSTGRES_HOST=postgres.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ideaboard-local
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+components:
+  - ../../components/in-cluster-postgres
+
+configMapGenerator:
+  - name: backend-config
+    behavior: merge
+    literals:
+      - APP_ENV=local
+
+replicas:
+  - name: backend
+    count: 1
+  - name: frontend
+    count: 1
+
+images:
+  - name: ideaboard-backend
+    newName: ghcr.io/OWNER/ideaboard-backend
+    newTag: latest
+  - name: ideaboard-frontend
+    newName: ghcr.io/OWNER/ideaboard-frontend
+    newTag: latest

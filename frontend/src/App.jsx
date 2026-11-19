@@ -4,6 +4,7 @@ import {
   createIdea,
   getIdeas,
   getVersion,
+  planEnvironment,
   recommendDeployment,
 } from "./api.js";
 import { FAILED_LOG, HEALTHY_LOG } from "./samples.js";
@@ -25,7 +26,10 @@ export default function App() {
       </header>
       <main className="grid">
         <IdeaBoard />
-        <AiPanel />
+        <div className="stack">
+          <AiPanel />
+          <EnvPlanner />
+        </div>
       </main>
     </div>
   );
@@ -33,8 +37,7 @@ export default function App() {
 
 function IdeaBoard() {
   const [ideas, setIdeas] = useState([]);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
+  const [content, setContent] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -48,14 +51,13 @@ function IdeaBoard() {
 
   async function onSubmit(e) {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!content.trim()) return;
     setSaving(true);
     setError("");
     try {
-      const idea = await createIdea({ title, description });
+      const idea = await createIdea({ content });
       setIdeas((prev) => [idea, ...prev]);
-      setTitle("");
-      setDescription("");
+      setContent("");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -67,19 +69,14 @@ function IdeaBoard() {
     <section className="card">
       <h2>Ideas</h2>
       <form onSubmit={onSubmit} className="form">
-        <input
-          placeholder="Idea title"
-          value={title}
-          maxLength={200}
-          onChange={(e) => setTitle(e.target.value)}
-        />
         <textarea
-          placeholder="Description (optional)"
-          value={description}
+          placeholder="What's your idea?"
+          value={content}
           rows={3}
-          onChange={(e) => setDescription(e.target.value)}
+          maxLength={2000}
+          onChange={(e) => setContent(e.target.value)}
         />
-        <button disabled={saving || !title.trim()}>{saving ? "Saving…" : "Add idea"}</button>
+        <button disabled={saving || !content.trim()}>{saving ? "Saving…" : "Add idea"}</button>
       </form>
       {error && <p className="error">{error}</p>}
       {loading ? (
@@ -90,8 +87,7 @@ function IdeaBoard() {
         <ul className="ideas">
           {ideas.map((i) => (
             <li key={i.id}>
-              <strong>{i.title}</strong>
-              {i.description && <p>{i.description}</p>}
+              <p className="content">{i.content}</p>
               <time>{new Date(i.created_at).toLocaleString()}</time>
             </li>
           ))}
@@ -177,6 +173,58 @@ function AiPanel() {
           <List title="Reasons" items={rec.reasons} />
           <List title="Checks" items={rec.pre_deploy_checks} />
           {rec.note && <p className="muted">{rec.note}</p>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EnvPlanner() {
+  const [goal, setGoal] = useState("cost-sensitive staging");
+  const [plan, setPlan] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      setPlan(await planEnvironment(goal));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>AI Environment Planner</h2>
+      <form className="row" onSubmit={run}>
+        <input value={goal} onChange={(e) => setGoal(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
+        <button disabled={busy || goal.trim().length < 3}>{busy ? "Planning…" : "Plan"}</button>
+      </form>
+      <div className="row" style={{ marginTop: 8 }}>
+        {["cost-sensitive staging", "high-availability production", "high-traffic launch"].map((g) => (
+          <button key={g} className="secondary" onClick={() => setGoal(g)}>{g}</button>
+        ))}
+      </div>
+      {error && <p className="error">{error}</p>}
+      {plan && (
+        <div className="result">
+          <h3>
+            {plan.profile_name} <small>via {plan.source}</small>
+          </h3>
+          <ul>
+            <li>Cluster: {plan.cluster_flavor}, {plan.node_count} × {plan.node_size} node(s)</li>
+            <li>Replicas: backend {plan.backend_replicas}, frontend {plan.frontend_replicas}</li>
+            <li>Backend: {plan.backend_cpu_request_millicores}m CPU request, {plan.backend_memory_limit_mib}Mi memory limit</li>
+            <li>Database: {plan.db_size}{plan.db_high_availability ? " (high availability)" : ""}</li>
+          </ul>
+          <List title="Rationale" items={plan.rationale} />
+          <List title="Guardrail adjustments" items={plan.adjustments} />
+          {plan.note && <p className="muted">{plan.note}</p>}
         </div>
       )}
     </section>

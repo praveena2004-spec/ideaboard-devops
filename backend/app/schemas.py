@@ -6,16 +6,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # ---------- Ideas ----------
 class IdeaCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    description: str = Field(default="", max_length=5000)
+    """POST /api/ideas body, e.g. {"content": "My new idea"}."""
+
+    content: str = Field(min_length=1, max_length=2000)
 
 
 class IdeaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    title: str
-    description: str
+    content: str
     created_at: datetime
 
 
@@ -62,3 +62,29 @@ class DeploymentRecommendation(BaseModel):
 class DeploymentRecommendationOut(DeploymentRecommendation):
     source: Literal["llm", "rules"]
     note: str = ""
+
+
+# ---------- AI: environment planning (goal -> sizing) ----------
+class EnvironmentGoal(BaseModel):
+    goal: str = Field(min_length=3, max_length=1000,
+                      description='e.g. "cost-sensitive staging" or "high-availability production"')
+
+
+class EnvironmentPlan(BaseModel):
+    profile_name: str
+    cluster_flavor: Literal["k3s", "managed"]
+    node_size: Literal["small", "medium", "large"]
+    node_count: int
+    backend_replicas: int
+    frontend_replicas: int
+    backend_cpu_request_millicores: int
+    backend_memory_limit_mib: int
+    db_size: Literal["micro", "small", "medium"]
+    db_high_availability: bool
+    rationale: list[str]
+
+
+class EnvironmentPlanOut(EnvironmentPlan):
+    source: Literal["llm", "rules"]
+    note: str = ""
+    adjustments: list[str] = Field(default_factory=list, description="guardrail corrections applied to the plan")

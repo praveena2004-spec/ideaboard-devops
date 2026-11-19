@@ -1,0 +1,8 @@
+# Optional component: PostgreSQL inside the cluster. Used only by the `local`
+# overlay (kind/minikube). Cloud environments use the managed database that
+# Terraform provisions (RDS / Cloud SQL) instead.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - postgres.yaml
